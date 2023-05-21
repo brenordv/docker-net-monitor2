@@ -9,6 +9,9 @@ if [ -z "$mqtt_server" ]; then
   exit 1
 fi
 
+# Remove existing docker container
+docker stop conn_monitor || true && docker rm conn_monitor || true
+
 # Build the docker command with the environment variable
 docker_command="docker run -d --restart=unless-stopped --name conn_monitor -e MQTT_SERVER=${mqtt_server} -it raccoon_conn_monitor:latest"
 
