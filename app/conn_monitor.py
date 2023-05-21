@@ -36,8 +36,7 @@ def test_internet_connection(url: str) -> Union[dict, None]:
     timeout = 5  # Set a timeout of 5 seconds
     sw = StopWatch(True)
     try:
-        response = requests.get(url, timeout=timeout)
-        response.raise_for_status()
+        response = requests.get(url, timeout=timeout, verify=False)
 
         return {
             "timestamp": datetime.now().strftime('%Y-%m-%dT%H:%M:%S.%fZ'),
