@@ -8,11 +8,12 @@ from typing import Union
 import requests
 import speedtest
 import paho.mqtt.client as mqtt
+import urllib3
 
 from raccoon_simple_stopwatch.stopwatch import StopWatch
 from simple_log_factory.log_factory import log_factory
 
-
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 internet_outage = False
 internet_outage_sw = StopWatch()
 pending_messages = []
@@ -24,6 +25,9 @@ site_list = itertools.cycle([
     "https://www.bing.com"
 ])
 mqtt_server = os.environ.get("MQTT_SERVER")
+queue_net_mon = "/home/net-monitor"
+queue_alerts_info = "/alerts/info"
+
 
 if mqtt_server is None:
     raise Exception("MQTT_SERVER environment variable is not set")
@@ -31,7 +35,6 @@ if mqtt_server is None:
 
 def test_internet_connection(url: str) -> Union[dict, None]:
     global logger
-    global pending_messages
     logger.info("Testing internet connection...")
     timeout = 5  # Set a timeout of 5 seconds
     sw = StopWatch(True)
@@ -47,14 +50,14 @@ def test_internet_connection(url: str) -> Union[dict, None]:
             "type": 1
         }
     except requests.RequestException as re:
-        pending_messages.append({
+        return {
             "timestamp": datetime.now().strftime('%Y-%m-%dT%H:%M:%S.%fZ'),
             "status": re.response.status_code,
             "response_time": round(sw.end(raw=True).total_seconds() * 1000, 2),
             "error_text": re.response.text,
             "success": False,
             "type": 1
-        })
+        }
     except Exception as e:
         logger.error(f"Failed to test internet connection: {e}")
 
@@ -101,43 +104,39 @@ def _get_mqtt_client():
         return None
 
 
-def _publish_mqtt_message(topic: str, client, message, save_if_failed=True) -> bool:
+def _add_to_pending_messages(topic: str, message: Union[dict, str]):
     global pending_messages
+    pending_messages.append({
+        "topic": topic,
+        "message": message
+    })
+
+
+def _publish_mqtt_message(topic: str, client: mqtt.Client, message: Union[dict, str], save_if_failed=True) -> bool:
     global logger
     try:
-        client.publish(topic, json.dumps(message))
+        if client is None:
+            _add_to_pending_messages(topic, message)
+            return False
+
+        payload = message if isinstance(message, str) else json.dumps(message)
+        client.publish(topic, payload)
         client.disconnect()
         return True
     except Exception as e:
         logger.error(f"Failed to publish MQTT message: {e}")
         if save_if_failed:
-            pending_messages.append(message)
+            _add_to_pending_messages(topic, message)
 
         return False
 
 
-def _publish_mqtt_message_to_net_mon_topic(client, message, save_if_failed=True):
-    return _publish_mqtt_message("/home/net-monitor", client, message, save_if_failed)
-
-
-def _publish_mqtt_message_to_alerts_info(client, message, save_if_failed=True):
-    return _publish_mqtt_message("/alerts/info", client, message, save_if_failed)
-
-
-def publish_single_message(message, where_to_publish: str = "net_mon"):
+def publish_single_message(message: Union[dict, str], topic: str):
     global logger
-    global pending_messages
     logger.info("Publishing message...")
 
     client = _get_mqtt_client()
-    if client is None:
-        pending_messages.append(message)
-        return
-
-    if where_to_publish == "net_mon":
-        _publish_mqtt_message_to_net_mon_topic(client, message)
-    elif where_to_publish == "alerts_info":
-        _publish_mqtt_message_to_alerts_info(client, message)
+    _publish_mqtt_message(topic, client, message)
 
 
 def publish_pending_messages():
@@ -154,8 +153,11 @@ def publish_pending_messages():
         return
 
     failed_messages = []
-    for message in pending_messages:
-        published = _publish_mqtt_message_to_net_mon_topic(client, message, save_if_failed=False)
+    for pending_message in pending_messages:
+        topic = pending_message["topic"]
+        message = pending_message["message"]
+        published = _publish_mqtt_message(topic, client, message, save_if_failed=False)
+
         if published:
             continue
         failed_messages.append(message)
@@ -178,13 +180,11 @@ def toggle_outage_control(success: bool):
         elapsed_time = internet_outage_sw.end()
         msg = f"Internet outage resolved. Outage duration: {elapsed_time}"
         logger.info(msg)
-        publish_single_message({"message": msg}, where_to_publish="alerts_info")
+        publish_single_message(msg, topic=queue_alerts_info)
         return
 
 
 def main():
-
-    global pending_messages
     global site_list
     global logger
     initial_min = time.strftime("%M")
@@ -192,13 +192,13 @@ def main():
     while True:
         net_mon_result = test_internet_connection(next(site_list))
         if net_mon_result is not None:
-            publish_single_message(net_mon_result)
+            publish_single_message(net_mon_result, topic=queue_net_mon)
 
         if time.strftime("%M") == initial_min:
             speed_test_result = run_speed_test()
 
             if speed_test_result is not None:
-                publish_single_message(speed_test_result)
+                publish_single_message(speed_test_result, topic=queue_net_mon)
 
         if net_mon_result is not None:
             success = net_mon_result.get("success", False)
